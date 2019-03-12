@@ -4,10 +4,15 @@
 import pandas as pd
 from sklearn.utils import shuffle
 import re
+import numpy as np
 import utils.DrawUtil as du
 import utils.ReadUtil as ru
 import utils.CutExtend as CutExtend
 from utils.PathUtil import Path
+import utils.DataAccess as da
+import random
+import pickle
+
 
 
 def filter_out_classes(file, level=1, method=0):
@@ -209,3 +214,180 @@ def trans_to_detail(labs, path):
     with open(path, 'w', encoding='utf-8') as f:
         f.write(detail)
     return detail
+
+
+def create_region_list(path, level=3):
+    """
+    根据数据的路径和等级得出每类的范围
+    :param path: train.tsv 的路径
+    :param level: 创建范围的等级
+    :return: 每类的范围 eg：[[0,40],[40,60],...]
+    """
+
+    data_of_type = pd.read_csv(path, sep='\t')
+    dict_of_type = {}
+    list_of_region = []
+    index = 0
+    if level == 1:
+        for i in data_of_type['TYPE']:   # i为str类型
+            index += 1
+            if i.split("--")[0] not in dict_of_type:
+                dict_of_type[i] = index
+    elif level == 2:
+        # 还没有弄过2级
+        pass
+    elif level == 3:
+        for i in data_of_type['TYPE']:   # i为str类型
+            index += 1
+            if i not in dict_of_type:
+                dict_of_type[i] = index
+
+    list_of_num = [dict_of_type[i] for i in dict_of_type]
+    list_of_num.append(len(data_of_type) + 1)
+
+    for i in range(len(list_of_num) - 1):
+        list_of_region.append([list_of_num[i], list_of_num[i + 1] - 1])
+
+    return list_of_region
+
+
+def cut_word_and_transform_type(path, dict_of_type):
+    """
+
+    :param path: 切分数据
+    :param dict_of_type: 标签字典
+    :return: 切分后的dataframe
+    """
+    df = pd.read_csv(path, sep='\t')
+    # 分词
+    print('正在分词....')
+    for index, row in df.iterrows():
+        if index % 10000 == 0:
+            print('已分词:%.2f%%' % ((index / len(df)) * 100))
+        row['ITEM_NAME'] = CutExtend.seg_depart(row['ITEM_NAME'])
+        row['TYPE'] = '_label_' + str(dict_of_type[row['TYPE']])
+    print('分词完成')
+
+    return df
+
+
+def slice_rate_to_tsv(region_list, path, train_tsv_path, test_tsv_path, rate=0.8):
+    """
+    将每类范围的数据按比例分成训练集和测试集并保存成 pkl
+    :param region_list: 每类的范围列表 eg：[[0,40],[40,60],...]
+    :param path: train.tsv 的路径
+    :param train_pkl_path: 切分的80%训练集保存的路径
+    :param test_pkl_path: 切分的20%测试集保存的路径
+    :param rate: 切分比例
+    """
+    dataframe = pd.read_csv(path, sep='\t')
+    data = np.array(dataframe)
+    df_train = []
+    df_test = []
+    tail = 0
+    for index, i in enumerate(region_list):
+        if index % 10 == 0:
+            print('已切分:%.2f%%' % ((index / len(region_list)) * 100))
+        middle = tail + int((i[1] - i[0]) * rate)
+        df_train += list(data[i[0]: middle, :])
+        df_test += list(data[middle:i[1] + 1, :])
+        tail = i[1]
+
+    # df_train = np.array(df_train)
+    # df_test = np.array(df_test)
+
+    df_train = pd.DataFrame(data=df_train, columns=['ITEM_NAME', 'TYPE'])
+    df.to_csv(train_tsv_path, sep='\t', index=False, encoding="utf-8")
+    # trFp = open(train_pkl_path, 'wb')
+    # pickle.dump(df_train, trFp)
+    # trFp.close()
+
+    df_test = pd.DataFrame(data=df_test, columns=['ITEM_NAME', 'TYPE'])
+    df.to_csv(test_tsv_path, sep='\t', index=False, encoding="utf-8")
+    # teFp = open(test_pkl_path, 'wb')
+    # pickle.dump(df_test, teFp)
+    # teFp.close()
+
+
+def pkl_to_tsv(pkl_path, tsv_path):
+    """
+
+    :param pkl_path:
+    :param tsv_path:
+    """
+    f = open(pkl_path, 'rb')
+    df = pickle.load(f)
+    df.to_csv(tsv_path, sep='\t', index=False, encoding="utf-8")
+    f.close()
+
+
+def multiple_and_average(cut_after_dataframe, list_region):
+    """
+    采用打乱的方式，扩充类别少的数据，使数据集中的各类数据均衡。
+    :param cut_after_dataframe: 切分之后的数据
+    :param list_region: 各类别的范围列表
+    :return: 扩大之后的数据集 dataframe类型
+    """
+    # 根据范围列表得出 需要扩大倍数的列表
+    MAX = max([i[1] - i[0] for i in list_region])
+    list_of_multiple = [int(MAX / (i[1] - i[0])) for i in list_region]
+
+    data_list = np.array(cut_after_dataframe).tolist()
+    data = []
+    for index, i in enumerate(list_of_multiple):
+        if index % 10 == 0:
+            print(index / 10)
+        if i == 1:  # 一倍不需要
+            data.extend(data_list[list_region[index][0]: list_region[index][1]])
+            continue
+        for j in range(list_region[index][0], list_region[index][1]):
+            aa = CutExtend.seg_depart(data_list[j][0]).split()
+            for z in range(10): # range(i)
+                bb = aa[:]
+                try:
+                    bb.pop(random.randrange(0, len(bb)))
+                except ValueError:
+                    pass
+                # random.shuffle(aa)
+                data.append([' '.join(bb), data_list[j][1]])
+        data.extend(data_list[list_region[index][0]: list_region[index][1]])
+    print("扩充后的数据:"+str(len(data))+"项")
+
+    return pd.DataFrame(data=data, columns=['ITEM_NAME', 'TYPE'])
+
+
+if __name__ == '__main__':
+
+    p = Path()
+    dataDirectoryPath = p.data_directory
+    # train_pkl_path = dataDirectoryPath + '/'
+    # test_pkl_path = dataDirectoryPath + '/'
+
+    # 获取类别字典
+    dic = ru.get_classes(dataDirectoryPath + '/classes.txt')
+    # 先切分数据 才能增加数据
+    # 切分训练集数据
+    df = cut_word_and_transform_type(dataDirectoryPath+'/train80.tsv', dic)
+    # 类别范围
+    list_region = create_region_list(dataDirectoryPath + '/train80.tsv', level=3)
+    # 扩大数据
+    df = multiple_and_average(df, list_region)
+    # 将训练集数据变成fasttext格式
+    df_train = shuffle(df)
+    df_train.to_csv(dataDirectoryPath + '/train_drag_out.txt', sep='\t', index=False, encoding="utf-8", header=0)
+
+    # # 处理测试集数据变成fasttext格式
+    # df = cut_word_and_transform_type(dataDirectoryPath+'/test20.tsv', level=3)
+    # testdf = shuffle(df)
+    # testdf.to_csv(dataDirectoryPath + '/test.txt', sep='\t', index=False, encoding="utf-8", header=0)
+
+    # # 先得出范围才能分开
+    # # 类别范围
+    # list_region = create_region_list(dataDirectoryPath + '/train.tsv', level=3)
+    # # 将训练集合测试集分开
+    # slice_rate_to_tsv(list_region, p.ori_data, train_pkl_path, test_pkl_path, rate=0.8)
+
+    # 将 dataframe 保存成 pkl
+    # trFp = open(dataDirectoryPath + '/train80_plus.pkl', 'wb')
+    # pickle.dump(df_train, trFp)
+    # trFp.close()
